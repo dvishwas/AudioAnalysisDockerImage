@@ -22,16 +22,23 @@ def load_models():
     global diarization_pipeline, verification_model
     
     try:
+        # Check GPU availability
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using device: {device}")
+        
         # Load pyannote diarization model
         logger.info("Loading pyannote diarization model...")
         diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+        if torch.cuda.is_available():
+            diarization_pipeline = diarization_pipeline.to(torch.device("cuda"))
         logger.info("Pyannote model loaded successfully")
         
         # Load SpeechBrain verification model
         logger.info("Loading SpeechBrain verification model...")
-        verification_model = SpeakerRecognition.from_hparams(
+        verification_model = SpeechBrain.from_hparams(
             source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir="pretrained_speechbrain"
+            savedir="pretrained_speechbrain",
+            run_opts={"device": device}
         )
         logger.info("SpeechBrain model loaded successfully")
         
