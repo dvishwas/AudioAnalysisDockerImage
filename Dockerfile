@@ -17,18 +17,28 @@ RUN pip install --only-binary=all --ignore-installed \
 # Copy download script
 COPY download_models.py .
 
+# Download models during build (requires HF_TOKEN_BUILD build arg)
+ARG HF_TOKEN_BUILD
+RUN if [ -z "$HF_TOKEN_BUILD" ]; then \
+        echo "ERROR: HF_TOKEN_BUILD build argument is required"; \
+        echo "Build with: docker build --build-arg HF_TOKEN_BUILD=your_token ."; \
+        exit 1; \
+    fi
+
+# Download and cache models
+RUN export HF_TOKEN_BUILD="$HF_TOKEN_BUILD" && \
+    python download_models.py && \
+    echo "Models cached successfully"
+
+# Verify models are cached
+RUN python -c "import os; print('Cache contents:'); os.system('find /root/.cache -name \"*.bin\" -o -name \"*.pt\" -o -name \"*.pth\" | head -10')"
+
 # Copy app code
 COPY app /app
 
-# Download models during build (requires HF_TOKEN_BUILD build arg)
-ARG HF_TOKEN_BUILD
-RUN if [ -n "$HF_TOKEN_BUILD" ]; then \
-    export HF_TOKEN_BUILD="$HF_TOKEN_BUILD" && \
-    python download_models.py; \
-    fi
-
-# Clean up download script
+# Clean up download script and token
 RUN rm -f download_models.py
+ENV HF_TOKEN_BUILD=""
 
 # Expose port
 EXPOSE 8000

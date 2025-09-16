@@ -18,7 +18,7 @@ diarization_pipeline = None
 verification_model = None
 
 def load_models():
-    """Load both models"""
+    """Load both models from cached files"""
     global diarization_pipeline, verification_model
     
     try:
@@ -26,16 +26,19 @@ def load_models():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
         
-        # Load pyannote diarization model
-        logger.info("Loading pyannote diarization model...")
-        diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+        # Load pyannote diarization model from cache (no auth needed)
+        logger.info("Loading pyannote diarization model from cache...")
+        diarization_pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=False  # Use cached model, no auth required
+        )
         if torch.cuda.is_available():
             diarization_pipeline = diarization_pipeline.to(torch.device("cuda"))
         logger.info("Pyannote model loaded successfully")
         
-        # Load SpeechBrain verification model
-        logger.info("Loading SpeechBrain verification model...")
-        verification_model = SpeechBrain.from_hparams(
+        # Load SpeechBrain verification model from cache
+        logger.info("Loading SpeechBrain verification model from cache...")
+        verification_model = SpeakerRecognition.from_hparams(
             source="speechbrain/spkrec-ecapa-voxceleb",
             savedir="pretrained_speechbrain",
             run_opts={"device": device}
@@ -44,6 +47,7 @@ def load_models():
         
     except Exception as e:
         logger.error(f"Error loading models: {e}")
+        logger.error("Models may not be properly cached. Rebuild with HF_TOKEN_BUILD.")
         raise
 
 # Load models on startup
@@ -61,16 +65,24 @@ async def health():
 @app.post("/diarize")
 async def diarize_audio(file: UploadFile = File(...)):
     """Speaker diarization - who spoke when"""
+    import time
+    start_time = time.time()
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         content = await file.read()
         tmp_file.write(content)
         tmp_file.flush()
         
         try:
+            # Log file info
+            waveform, sr = torchaudio.load(tmp_file.name)
+            duration = waveform.shape[1] / sr
+            logger.info(f"Processing audio: {file.filename}, duration: {duration:.2f}s, sample_rate: {sr}")
+            
             # Run diarization
             diarization = diarization_pipeline(tmp_file.name)
             
-            # Convert to list format
+            # Convert to list format and count segments
             results = []
             for turn, _, speaker in diarization.itertracks(yield_label=True):
                 results.append({
@@ -79,7 +91,15 @@ async def diarize_audio(file: UploadFile = File(...)):
                     "speaker": speaker
                 })
             
-            return {"diarization_results": results}
+            processing_time = time.time() - start_time
+            logger.info(f"Diarization complete: {len(results)} segments found in {processing_time:.2f}s")
+            
+            return {
+                "diarization_results": results,
+                "processing_time": processing_time,
+                "audio_duration": duration,
+                "segments_count": len(results)
+            }
             
         finally:
             os.unlink(tmp_file.name)
