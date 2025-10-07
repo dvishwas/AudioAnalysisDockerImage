@@ -63,7 +63,13 @@ async def health():
     }
 
 @app.post("/diarize")
-async def diarize_audio(file: UploadFile = File(...)):
+async def diarize_audio(
+    file: UploadFile = File(...),
+    min_speakers: int = None,
+    max_speakers: int = None,
+    num_speakers: int = None,
+    min_duration: float = None
+):
     """Speaker diarization - who spoke when"""
     import time
     start_time = time.time()
@@ -79,8 +85,20 @@ async def diarize_audio(file: UploadFile = File(...)):
             duration = waveform.shape[1] / sr
             logger.info(f"Processing audio: {file.filename}, duration: {duration:.2f}s, sample_rate: {sr}")
             
+            # Build kwargs for pipeline
+            kwargs = {}
+            if num_speakers is not None:
+                kwargs['num_speakers'] = num_speakers
+            else:
+                if min_speakers is not None:
+                    kwargs['min_speakers'] = min_speakers
+                if max_speakers is not None:
+                    kwargs['max_speakers'] = max_speakers
+            if min_duration is not None:
+                kwargs['min_duration'] = min_duration
+            
             # Run diarization
-            diarization = diarization_pipeline(tmp_file.name)
+            diarization = diarization_pipeline(tmp_file.name, **kwargs)
             
             # Convert to list format and count segments
             results = []
@@ -105,8 +123,10 @@ async def diarize_audio(file: UploadFile = File(...)):
             os.unlink(tmp_file.name)
 
 @app.post("/embedding")
-async def get_embedding(file: UploadFile = File(...)):
+async def get_embedding(file: UploadFile = File(...), normalize: bool = True):
     """Extract speaker embedding from audio"""
+    import torch.nn.functional as F
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         content = await file.read()
         tmp_file.write(content)
@@ -117,13 +137,19 @@ async def get_embedding(file: UploadFile = File(...)):
             # Resample if needed
             if sr != 16000:
                 waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
-            embedding = verification_model.encode_batch(waveform).squeeze().tolist()
-            return {"embedding": embedding}
+            
+            embedding = verification_model.encode_batch(waveform).squeeze()
+            
+            # Normalize if requested (recommended for cosine similarity)
+            if normalize:
+                embedding = F.normalize(embedding, p=2, dim=0)
+            
+            return {"embedding": embedding.tolist(), "normalized": normalize}
         finally:
             os.unlink(tmp_file.name)
 
 @app.post("/compare")
-async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = File(...)):
+async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = File(...), threshold: float = 0.25):
     """Compare two audio files for speaker similarity"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file1, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file2:
@@ -145,7 +171,71 @@ async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = Fi
                 waveform2 = torchaudio.transforms.Resample(sr2, 16000)(waveform2)
                 
             score, prediction = verification_model.verify_batch(waveform1, waveform2)
-            return {"similarity_score": float(score), "same_speaker": bool(prediction)}
+            return {
+                "similarity_score": float(score),
+                "same_speaker": bool(prediction),
+                "threshold": threshold
+            }
         finally:
             os.unlink(tmp_file1.name)
             os.unlink(tmp_file2.name)
+
+@app.post("/compare_embedding")
+async def compare_audio_to_embedding(
+    audio: UploadFile = File(...),
+    embedding: UploadFile = File(...),
+    threshold: float = 0.25
+):
+    """Compare audio file against a pre-computed embedding from pkl file"""
+    import torch.nn.functional as F
+    import pickle
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as audio_file, \
+         tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as emb_file:
+        
+        # Save audio file
+        audio_content = await audio.read()
+        audio_file.write(audio_content)
+        audio_file.flush()
+        
+        # Save and load embedding pkl file
+        emb_content = await embedding.read()
+        emb_file.write(emb_content)
+        emb_file.flush()
+        
+        try:
+            # Load stored embedding from pkl
+            with open(emb_file.name, 'rb') as f:
+                stored_embedding_data = pickle.load(f)
+            
+            # Convert to tensor (handle list or numpy array)
+            if isinstance(stored_embedding_data, list):
+                stored_embedding = torch.tensor(stored_embedding_data, dtype=torch.float32)
+            else:
+                stored_embedding = torch.tensor(stored_embedding_data, dtype=torch.float32)
+            
+            # Load and process audio
+            waveform, sr = torchaudio.load(audio_file.name)
+            if sr != 16000:
+                waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+            
+            # Extract embedding from audio
+            audio_embedding = verification_model.encode_batch(waveform).squeeze()
+            
+            # Normalize both embeddings for cosine similarity
+            audio_embedding = F.normalize(audio_embedding, p=2, dim=0)
+            stored_embedding = F.normalize(stored_embedding, p=2, dim=0)
+            
+            # Compute cosine similarity
+            similarity = F.cosine_similarity(audio_embedding.unsqueeze(0), stored_embedding.unsqueeze(0))
+            score = float(similarity)
+            same_speaker = score > threshold
+            
+            return {
+                "similarity_score": score,
+                "same_speaker": same_speaker,
+                "threshold": threshold
+            }
+        finally:
+            os.unlink(audio_file.name)
+            os.unlink(emb_file.name)

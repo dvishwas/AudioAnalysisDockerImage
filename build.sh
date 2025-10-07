@@ -27,14 +27,15 @@ if [ -z "$1" ]; then
 fi
 
 HF_TOKEN="$1"
-IMAGE_NAME="audio-analysis-template"
+IMAGE_NAME="dvishwas/audio-analysis-template"
 TAG="latest"
 
 echo -e "${YELLOW}Building with HuggingFace authentication...${NC}"
+echo "Platform: linux/amd64"
 echo "This will download and cache models during build time."
 echo ""
 
-# Build the Docker image
+# Build the Docker image for linux/amd64
 docker build \
     --build-arg HF_TOKEN_BUILD="$HF_TOKEN" \
     --platform linux/amd64 \
@@ -45,13 +46,18 @@ if [ $? -eq 0 ]; then
     echo ""
     echo -e "${GREEN}✓ Build completed successfully!${NC}"
     echo ""
+    echo "Image: $IMAGE_NAME:$TAG"
+    echo ""
     echo "To run the container:"
     echo "  docker run --gpus all -p 8000:8000 $IMAGE_NAME:$TAG"
     echo ""
     echo "To test the API:"
     echo "  curl http://localhost:8000/health"
     echo ""
-    echo "Models are now cached and no runtime authentication is needed!"
+    echo "To push to Docker Hub:"
+    echo "  docker push $IMAGE_NAME:$TAG"
+    echo ""
+    echo "Models are cached in the image - no runtime HuggingFace access needed!"
 else
     echo -e "${RED}✗ Build failed${NC}"
     exit 1

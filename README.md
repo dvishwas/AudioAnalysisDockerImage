@@ -23,8 +23,6 @@ docker run -p 8000:8000 dvishwas/audio-analysis-template:latest
 
 ### Local Development
 ```bash
-git clone https://github.com/your-username/docker-image-pyannote-speechbrain
-cd docker-image-pyannote-speechbrain
 docker build --build-arg HF_TOKEN_BUILD=your_hf_token -t audio-analysis .
 docker run --gpus all -p 8000:8000 audio-analysis
 ```
@@ -33,27 +31,49 @@ docker run --gpus all -p 8000:8000 audio-analysis
 
 ### Health Check
 **GET** `/health`
+
+Check API status and model availability.
+
 ```bash
 curl https://your-pod-id-8000.proxy.runpod.net/health
 ```
+
 **Response:**
 ```json
 {
   "status": "healthy",
   "diarization_model_loaded": true,
-  "verification_model_loaded": true,
-  "device": "cuda",
-  "gpu_available": true
+  "verification_model_loaded": true
 }
 ```
+
+---
 
 ### Speaker Diarization
 **POST** `/diarize`
 
 Identifies "who spoke when" in audio files. Returns timestamped speaker segments.
 
+**Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | File | Required | Audio file (WAV, MP3, FLAC, M4A, OGG) |
+| `min_speakers` | int | None | Minimum number of speakers expected |
+| `max_speakers` | int | None | Maximum number of speakers expected |
+| `num_speakers` | int | None | Exact number of speakers (overrides min/max) |
+| `min_duration` | float | None | Minimum segment duration in seconds |
+
+**Example Request:**
 ```bash
-curl -X POST -F "audio=@meeting.wav" \
+# Basic usage
+curl -X POST -F "file=@meeting.wav" \
+  https://your-pod-id-8000.proxy.runpod.net/diarize
+
+# With parameters
+curl -X POST \
+  -F "file=@meeting.wav" \
+  -F "num_speakers=3" \
+  -F "min_duration=0.5" \
   https://your-pod-id-8000.proxy.runpod.net/diarize
 ```
 
@@ -64,34 +84,90 @@ curl -X POST -F "audio=@meeting.wav" \
     {"start": 0.5, "end": 3.2, "speaker": "SPEAKER_00"},
     {"start": 3.5, "end": 7.1, "speaker": "SPEAKER_01"},
     {"start": 7.3, "end": 12.8, "speaker": "SPEAKER_00"}
-  ]
+  ],
+  "processing_time": 2.34,
+  "audio_duration": 15.0,
+  "segments_count": 3
 }
 ```
+
+---
 
 ### Speaker Embedding
 **POST** `/embedding`
 
-Extracts 192-dimensional speaker embedding vector for voice identification.
+Extracts 192-dimensional speaker embedding vector for voice identification. Use this for speaker enrollment and database storage.
 
+**Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | File | Required | Audio file containing speaker voice |
+| `normalize` | bool | true | L2-normalize embedding (recommended for cosine similarity) |
+
+**Example Request:**
 ```bash
-curl -X POST -F "audio=@speaker_sample.wav" \
+# Extract normalized embedding (recommended)
+curl -X POST -F "file=@speaker_sample.wav" \
+  https://your-pod-id-8000.proxy.runpod.net/embedding
+
+# Extract raw embedding (not normalized)
+curl -X POST \
+  -F "file=@speaker_sample.wav" \
+  -F "normalize=false" \
   https://your-pod-id-8000.proxy.runpod.net/embedding
 ```
 
 **Response:**
 ```json
 {
-  "embedding": [0.123, -0.456, 0.789, ...]
+  "embedding": [0.123, -0.456, 0.789, ...],
+  "normalized": true
 }
 ```
 
-### Speaker Comparison
+**Use Case - Speaker Enrollment:**
+```bash
+# 1. Extract embeddings from multiple samples
+curl -X POST -F "file=@user_sample1.wav" /embedding > emb1.json
+curl -X POST -F "file=@user_sample2.wav" /embedding > emb2.json
+curl -X POST -F "file=@user_sample5.wav" /embedding > emb5.json
+
+# 2. Average embeddings in your application
+# averaged_embedding = (emb1 + emb2 + ... + emb5) / 5
+
+# 3. Save to database with pickle
+import pickle
+with open('user_x_embedding.pkl', 'wb') as f:
+    pickle.dump(averaged_embedding, f)
+```
+
+---
+
+### Speaker Comparison (Audio vs Audio)
 **POST** `/compare`
 
-Compares two audio files to determine if they contain the same speaker.
+Compares two audio files to determine if they contain the same speaker. Quick verification without storing embeddings.
 
+**Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file1` | File | Required | First audio file |
+| `file2` | File | Required | Second audio file |
+| `threshold` | float | 0.25 | Similarity threshold for same_speaker decision |
+
+**Example Request:**
 ```bash
-curl -X POST -F "audio1=@speaker1.wav" -F "audio2=@speaker2.wav" \
+# Basic comparison
+curl -X POST \
+  -F "file1=@speaker1.wav" \
+  -F "file2=@speaker2.wav" \
+  https://your-pod-id-8000.proxy.runpod.net/compare
+
+# With custom threshold
+curl -X POST \
+  -F "file1=@speaker1.wav" \
+  -F "file2=@speaker2.wav" \
+  -F "threshold=0.35" \
   https://your-pod-id-8000.proxy.runpod.net/compare
 ```
 
@@ -102,6 +178,59 @@ curl -X POST -F "audio1=@speaker1.wav" -F "audio2=@speaker2.wav" \
   "same_speaker": true,
   "threshold": 0.25
 }
+```
+
+---
+
+### Speaker Verification (Audio vs Embedding)
+**POST** `/compare_embedding`
+
+Compares audio file against a pre-computed embedding (stored in pkl file). Use this for speaker verification against enrolled users.
+
+**Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `audio` | File | Required | Audio file to verify |
+| `embedding` | File | Required | Pickle file containing stored embedding |
+| `threshold` | float | 0.25 | Similarity threshold for same_speaker decision |
+
+**Example Request:**
+```bash
+# Verify audio against stored embedding
+curl -X POST \
+  -F "audio=@new_voice_sample.wav" \
+  -F "embedding=@user_x_embedding.pkl" \
+  https://your-pod-id-8000.proxy.runpod.net/compare_embedding
+
+# With custom threshold
+curl -X POST \
+  -F "audio=@new_voice_sample.wav" \
+  -F "embedding=@user_x_embedding.pkl" \
+  -F "threshold=0.35" \
+  https://your-pod-id-8000.proxy.runpod.net/compare_embedding
+```
+
+**Response:**
+```json
+{
+  "similarity_score": 0.87,
+  "same_speaker": true,
+  "threshold": 0.25
+}
+```
+
+**Use Case - Speaker Authentication:**
+```bash
+# User claims to be "user_x" and provides voice sample
+# 1. Load stored embedding from database (user_x_embedding.pkl)
+# 2. Compare new audio against stored embedding
+curl -X POST \
+  -F "audio=@authentication_attempt.wav" \
+  -F "embedding=@user_x_embedding.pkl" \
+  /compare_embedding
+
+# Response tells you if it's the same speaker
+# {"similarity_score": 0.87, "same_speaker": true, "threshold": 0.25}
 ```
 
 ## 🎯 Use Cases
