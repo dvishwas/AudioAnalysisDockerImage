@@ -184,9 +184,19 @@ async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = Fi
 async def compare_audio_to_embedding(
     audio: UploadFile = File(...),
     embedding: UploadFile = File(...),
-    threshold: float = 0.25
+    threshold: float = 0.25,
+    segment_start_time: float = None,
+    segment_end_time: float = None
 ):
-    """Compare audio file against a pre-computed embedding from pkl file"""
+    """Compare audio file (or segment) against a pre-computed embedding from pkl file
+    
+    Args:
+        audio: Audio file to verify
+        embedding: Pickle file containing stored embedding
+        threshold: Similarity threshold for same_speaker decision (default: 0.25)
+        segment_start_time: Start time of segment in seconds (optional)
+        segment_end_time: End time of segment in seconds (optional)
+    """
     import torch.nn.functional as F
     import pickle
     
@@ -218,6 +228,21 @@ async def compare_audio_to_embedding(
             waveform, sr = torchaudio.load(audio_file.name)
             if sr != 16000:
                 waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+            
+            # Extract segment if times provided
+            if segment_start_time is not None and segment_end_time is not None:
+                start_sample = int(segment_start_time * 16000)
+                end_sample = int(segment_end_time * 16000)
+                
+                # Validate segment bounds
+                if start_sample < 0 or end_sample > waveform.shape[1]:
+                    return {
+                        "error": f"Invalid segment: segment_start_time={segment_start_time}, segment_end_time={segment_end_time}, audio_duration={waveform.shape[1]/16000:.2f}s"
+                    }
+                if start_sample >= end_sample:
+                    return {"error": "segment_start_time must be less than segment_end_time"}
+                
+                waveform = waveform[:, start_sample:end_sample]
             
             # Extract embedding from audio
             audio_embedding = verification_model.encode_batch(waveform).squeeze()

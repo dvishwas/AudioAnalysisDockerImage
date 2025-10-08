@@ -185,7 +185,7 @@ curl -X POST \
 ### Speaker Verification (Audio vs Embedding)
 **POST** `/compare_embedding`
 
-Compares audio file against a pre-computed embedding (stored in pkl file). Use this for speaker verification against enrolled users.
+Compares audio file (or segment) against a pre-computed embedding (stored in pkl file). Use this for speaker verification against enrolled users.
 
 **Parameters:**
 | Parameter | Type | Default | Description |
@@ -193,13 +193,23 @@ Compares audio file against a pre-computed embedding (stored in pkl file). Use t
 | `audio` | File | Required | Audio file to verify |
 | `embedding` | File | Required | Pickle file containing stored embedding |
 | `threshold` | float | 0.25 | Similarity threshold for same_speaker decision |
+| `segment_start_time` | float | None | Start time of segment in seconds (optional) |
+| `segment_end_time` | float | None | End time of segment in seconds (optional) |
 
 **Example Request:**
 ```bash
-# Verify audio against stored embedding
+# Verify entire audio against stored embedding
 curl -X POST \
   -F "audio=@new_voice_sample.wav" \
   -F "embedding=@user_x_embedding.pkl" \
+  https://your-pod-id-8000.proxy.runpod.net/compare_embedding
+
+# Verify specific segment (2.5s to 5.3s) against stored embedding
+curl -X POST \
+  -F "audio=@conversation.wav" \
+  -F "embedding=@user_x_embedding.pkl" \
+  -F "segment_start_time=2.5" \
+  -F "segment_end_time=5.3" \
   https://your-pod-id-8000.proxy.runpod.net/compare_embedding
 
 # With custom threshold
@@ -231,6 +241,23 @@ curl -X POST \
 
 # Response tells you if it's the same speaker
 # {"similarity_score": 0.87, "same_speaker": true, "threshold": 0.25}
+```
+
+**Use Case - Segment-based Verification:**
+```bash
+# You have speaker segments from diarization
+# Segment: SPEAKER_00 spoke from 2.5s to 5.3s
+# Verify if this segment matches user_x
+
+curl -X POST \
+  -F "audio=@meeting_recording.wav" \
+  -F "embedding=@user_x_embedding.pkl" \
+  -F "segment_start_time=2.5" \
+  -F "segment_end_time=5.3" \
+  -F "threshold=0.35" \
+  /compare_embedding
+
+# Response: {"similarity_score": 0.42, "same_speaker": true, "threshold": 0.35}
 ```
 
 ## 🎯 Use Cases
