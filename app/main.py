@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
+from typing import Optional
 import torch
 import torchaudio
 from pyannote.audio import Pipeline
@@ -126,6 +127,10 @@ async def diarize_audio(
 async def get_embedding(file: UploadFile = File(...), normalize: bool = True):
     """Extract speaker embedding from audio"""
     import torch.nn.functional as F
+    import time
+    
+    start_time = time.time()
+    logger.info(f"[/embedding] Processing file: {file.filename}")
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         content = await file.read()
@@ -134,9 +139,18 @@ async def get_embedding(file: UploadFile = File(...), normalize: bool = True):
         
         try:
             waveform, sr = torchaudio.load(tmp_file.name)
+            duration = waveform.shape[1] / sr
+            logger.info(f"[/embedding] Audio loaded: duration={duration:.2f}s, sr={sr}")
+            
             # Resample if needed
             if sr != 16000:
                 waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+                logger.info(f"[/embedding] Resampled to 16kHz")
+            
+            # Move waveform to GPU if available
+            device = next(verification_model.mods.parameters()).device
+            waveform = waveform.to(device)
+            logger.info(f"[/embedding] Processing on device: {device}")
             
             embedding = verification_model.encode_batch(waveform).squeeze()
             
@@ -144,13 +158,21 @@ async def get_embedding(file: UploadFile = File(...), normalize: bool = True):
             if normalize:
                 embedding = F.normalize(embedding, p=2, dim=0)
             
-            return {"embedding": embedding.tolist(), "normalized": normalize}
+            processing_time = time.time() - start_time
+            logger.info(f"[/embedding] Complete: {processing_time:.2f}s, embedding_shape={embedding.shape}")
+            
+            return {"embedding": embedding.cpu().tolist(), "normalized": normalize}
         finally:
             os.unlink(tmp_file.name)
 
 @app.post("/compare")
 async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = File(...), threshold: float = 0.25):
     """Compare two audio files for speaker similarity"""
+    import time
+    
+    start_time = time.time()
+    logger.info(f"[/compare] Processing files: {file1.filename} vs {file2.filename}")
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file1, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file2:
         
@@ -164,13 +186,23 @@ async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = Fi
         try:
             waveform1, sr1 = torchaudio.load(tmp_file1.name)
             waveform2, sr2 = torchaudio.load(tmp_file2.name)
+            logger.info(f"[/compare] Audio loaded: file1={waveform1.shape[1]/sr1:.2f}s, file2={waveform2.shape[1]/sr2:.2f}s")
             
             if sr1 != 16000:
                 waveform1 = torchaudio.transforms.Resample(sr1, 16000)(waveform1)
             if sr2 != 16000:
                 waveform2 = torchaudio.transforms.Resample(sr2, 16000)(waveform2)
+            
+            # Move waveforms to GPU if available
+            device = next(verification_model.mods.parameters()).device
+            waveform1 = waveform1.to(device)
+            waveform2 = waveform2.to(device)
+            logger.info(f"[/compare] Processing on device: {device}")
                 
             score, prediction = verification_model.verify_batch(waveform1, waveform2)
+            processing_time = time.time() - start_time
+            logger.info(f"[/compare] Complete: {processing_time:.2f}s, score={float(score):.4f}, same_speaker={bool(prediction)}")
+            
             return {
                 "similarity_score": float(score),
                 "same_speaker": bool(prediction),
@@ -184,9 +216,9 @@ async def compare_speakers(file1: UploadFile = File(...), file2: UploadFile = Fi
 async def compare_audio_to_embedding(
     audio: UploadFile = File(...),
     embedding: UploadFile = File(...),
-    threshold: float = 0.25,
-    segment_start_time: float = None,
-    segment_end_time: float = None
+    threshold: float = Form(0.25),
+    segment_start_time: Optional[float] = Form(None),
+    segment_end_time: Optional[float] = Form(None)
 ):
     """Compare audio file (or segment) against a pre-computed embedding from pkl file
     
@@ -199,6 +231,19 @@ async def compare_audio_to_embedding(
     """
     import torch.nn.functional as F
     import pickle
+    import time
+    
+    start_time = time.time()
+    
+    # CRITICAL: Log received parameters FIRST
+    logger.info(f"[/compare_embedding] ========== RECEIVED PARAMETERS ==========")
+    logger.info(f"[/compare_embedding] audio.filename: {audio.filename}")
+    logger.info(f"[/compare_embedding] embedding.filename: {embedding.filename}")
+    logger.info(f"[/compare_embedding] threshold: {threshold}")
+    logger.info(f"[/compare_embedding] segment_start_time: {segment_start_time} (is None: {segment_start_time is None})")
+    logger.info(f"[/compare_embedding] segment_end_time: {segment_end_time} (is None: {segment_end_time is None})")
+    logger.info(f"[/compare_embedding] WILL EXTRACT SEGMENT: {segment_start_time is not None and segment_end_time is not None}")
+    logger.info(f"[/compare_embedding] ==========================================")
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as audio_file, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as emb_file:
@@ -217,6 +262,7 @@ async def compare_audio_to_embedding(
             # Load stored embedding from pkl
             with open(emb_file.name, 'rb') as f:
                 stored_embedding_data = pickle.load(f)
+            logger.info(f"[/compare_embedding] Loaded embedding from pkl: type={type(stored_embedding_data)}")
             
             # Convert to tensor (handle list or numpy array)
             if isinstance(stored_embedding_data, list):
@@ -226,26 +272,42 @@ async def compare_audio_to_embedding(
             
             # Load and process audio
             waveform, sr = torchaudio.load(audio_file.name)
+            duration = waveform.shape[1] / sr
+            logger.info(f"[/compare_embedding] Audio loaded: duration={duration:.2f}s, sr={sr}")
+            
             if sr != 16000:
                 waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+                logger.info(f"[/compare_embedding] Resampled to 16kHz")
             
             # Extract segment if times provided
             if segment_start_time is not None and segment_end_time is not None:
                 start_sample = int(segment_start_time * 16000)
                 end_sample = int(segment_end_time * 16000)
                 
+                logger.info(f"[/compare_embedding] Extracting segment: {segment_start_time:.2f}s to {segment_end_time:.2f}s")
+                
                 # Validate segment bounds
                 if start_sample < 0 or end_sample > waveform.shape[1]:
+                    logger.error(f"[/compare_embedding] Invalid segment bounds")
                     return {
                         "error": f"Invalid segment: segment_start_time={segment_start_time}, segment_end_time={segment_end_time}, audio_duration={waveform.shape[1]/16000:.2f}s"
                     }
                 if start_sample >= end_sample:
+                    logger.error(f"[/compare_embedding] start_time >= end_time")
                     return {"error": "segment_start_time must be less than segment_end_time"}
                 
                 waveform = waveform[:, start_sample:end_sample]
+                logger.info(f"[/compare_embedding] Segment extracted: duration={(end_sample-start_sample)/16000:.2f}s")
+            
+            # Get device and move all tensors to GPU
+            device = next(verification_model.mods.parameters()).device
+            waveform = waveform.to(device)
+            stored_embedding = stored_embedding.to(device)
+            logger.info(f"[/compare_embedding] Processing on device: {device}")
             
             # Extract embedding from audio
             audio_embedding = verification_model.encode_batch(waveform).squeeze()
+            logger.info(f"[/compare_embedding] Audio embedding extracted: shape={audio_embedding.shape}")
             
             # Normalize both embeddings for cosine similarity
             audio_embedding = F.normalize(audio_embedding, p=2, dim=0)
@@ -256,11 +318,17 @@ async def compare_audio_to_embedding(
             score = float(similarity)
             same_speaker = score > threshold
             
+            processing_time = time.time() - start_time
+            logger.info(f"[/compare_embedding] Complete: {processing_time:.2f}s, score={score:.4f}, same_speaker={same_speaker}, threshold={threshold}")
+            
             return {
                 "similarity_score": score,
                 "same_speaker": same_speaker,
                 "threshold": threshold
             }
+        except Exception as e:
+            logger.error(f"[/compare_embedding] Error: {str(e)}", exc_info=True)
+            raise
         finally:
             os.unlink(audio_file.name)
             os.unlink(emb_file.name)
